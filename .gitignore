@@ -1,3 +1,6 @@
 /generate_face/__pycache__/
-*.png
-*.out
+/generate_face/pic.png
+/generate_face/images/
+/generate_face/nohup.out
+/generate_face/Makefile
+/generate_face/pid
