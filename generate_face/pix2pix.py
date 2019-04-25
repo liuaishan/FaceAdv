@@ -2,6 +2,7 @@ import argparse
 import os
 import numpy as np
 import math
+import cv2
 import itertools
 
 import torchvision.transforms as transforms
@@ -27,24 +28,25 @@ os.makedirs('saved_models', exist_ok=True)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--epoch', type=int, default=0, help='epoch to start training from')
-parser.add_argument('--n_epochs', type=int, default=50, help='number of epochs of training')
+parser.add_argument('--n_epochs', type=int, default=200, help='number of epochs of training')
 parser.add_argument('--dataset_name', type=str, default="imageNet/train/", help='name of the dataset')
 parser.add_argument('--batch_size', type=int, default=8, help='size of the batches')
-parser.add_argument('--adv_times', type=float, default=10000, help='mult the adv loss of the times')
-parser.add_argument('--lr', type=float, default=0.0002, help='adam: learning rate')
+parser.add_argument('--adv_times', type=float, default=10, help='mult the adv loss of the times')
+parser.add_argument('--lr_G', type=float, default=0.0002, help='adam: learning rate')
+parser.add_argument('--lr_D', type=float, default=0.00002, help='adam: learning rate')
 parser.add_argument('--b1', type=float, default=0.5, help='adam: decay of first order momentum of gradient')
 parser.add_argument('--b2', type=float, default=0.9, help='adam: decay of first order momentum of gradient')
-parser.add_argument('--decay_epoch', type=int, default=1, help='epoch from which to start lr decay')
+parser.add_argument('--decay_epoch', type=int, default=20, help='epoch from which to start lr decay')
 parser.add_argument('--n_cpu', type=int, default=8, help='number of cpu threads to use during batch generation')
 parser.add_argument('--img_height', type=int, default=256, help='size of image height')
 parser.add_argument('--img_width', type=int, default=256, help='size of image width')
 parser.add_argument('--channels', type=int, default=3, help='number of image channels')
-parser.add_argument('--sample_interval', type=int, default=100, help='interval between sampling of images from generators')
+parser.add_argument('--sample_interval', type=int, default=500, help='interval between sampling of images from generators')
 parser.add_argument('--checkpoint_interval', type=int, default=-1, help='interval between model checkpoints')
 parser.add_argument('--generator_type', type=str, default='unet', help="'resnet' or 'unet'")
+parser.add_argument('--discriminator_type', type=str, default='cgan', help="'cgan' or 'cdcgan'")
 parser.add_argument('--n_residual_blocks', type=int, default=0, help='number of residual blocks in resnet generator')
 opt = parser.parse_args()
-print(opt)
 
 # Loss functions
 criterion_GAN = torch.nn.MSELoss()
@@ -58,8 +60,7 @@ patch = (opt.batch_size, 1, patch_h, patch_w)
 
 # Initialize generator and discriminator
 generator = GeneratorResNet(resblocks=opt.n_residual_blocks) if opt.generator_type == 'resnet' else GeneratorUNet()
-discriminator = Discriminator()
-print("complete generator and discriminator")
+discriminator = CDiscriminator() if opt.discriminator_type == "cgan" else CDCDiscriminator()
 if cuda:
     generator = generator.cuda()
     discriminator = discriminator.cuda()
@@ -79,14 +80,16 @@ else:
 lambda_trans = 100
 
 # Optimizers
-optimizer_G = torch.optim.Adam(generator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
-optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
+optimizer_G = torch.optim.Adam(generator.parameters(), lr=opt.lr_G, betas=(opt.b1, opt.b2))
+optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=opt.lr_D, betas=(opt.b1, opt.b2))
 
-print("complete optimizer")
 
 # Learning rate update schedulers
 lr_scheduler_G = torch.optim.lr_scheduler.LambdaLR(optimizer_G, lr_lambda=LambdaLR(opt.n_epochs, opt.epoch, opt.decay_epoch).step)
 lr_scheduler_D = torch.optim.lr_scheduler.LambdaLR(optimizer_D, lr_lambda=LambdaLR(opt.n_epochs, opt.epoch, opt.decay_epoch).step)
+
+# Buffers of previously generated samples
+Buffer = ReplayBuffer()
 
 # Inputs & targets memory allocation
 Tensor = torch.cuda.FloatTensor if cuda else torch.Tensor
@@ -105,16 +108,23 @@ transforms_ = [ transforms.Resize((opt.img_height, opt.img_width), Image.BICUBIC
 dataloader = DataLoader(ImageDataset("/media/dsg3/%s" % opt.dataset_name, transforms_=transforms_, mode=["n02102480", "n02105056"]),
                         batch_size=opt.batch_size, shuffle=True, num_workers=opt.n_cpu)
 
-print("complete dataloader")
 
 # Cifar loader
+transforms_cifar = [ 
+                transforms.ToTensor(),
+                transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5)) ]
+trans_cifar = transforms.Compose(transforms_cifar)
 cifar = scio.loadmat("/media/dsg3/datasets/cifar10/cifar_32.mat")
-cifar_data  = cifar['data'].reshape(60000, 3, 32, 32).astype(np.float32) / 127.5 - 1.0   # size is [60000, 3072] = [60000, 32*32*3]
+cifar_data  = cifar['data'].reshape(60000, 3, 32, 32).astype(np.float32) #/ 127.5 - 1.0   # size is [60000, 3072] = [60000, 32*32*3]
+b = []
+for i in range(60000):
+    #cifar_data[i] =
+    b.append(trans_cifar(cifar_data[i].swapaxes(0,1).swapaxes(1,2)).unsqueeze(0))
 cifar_label = cifar['label']  # size if [60000, 1]
-
-print("complete cifar")
+cifar_data =torch.cat(b,0).long()
 
 cifar_data = torch.LongTensor(cifar_data)
+print(cifar_data.shape)
 cifar_label = torch.LongTensor(cifar_label)
 cifar_label = torch.zeros(60000, 10).scatter_(1, cifar_label, 1)
 
@@ -141,6 +151,7 @@ for epoch in range(opt.epoch, opt.n_epochs):
             cifarIter = iter(cifarLoader)
 
         cifar_img_, cifar_vec_ = cifarIter.next()
+        
         cifar_img = Variable(input_cifar.copy_(cifar_img_))
         cifar_vec = Variable(input_vec.copy_(cifar_vec_))
         # Set model input
@@ -160,6 +171,8 @@ for epoch in range(opt.epoch, opt.n_epochs):
         """
         loss_G = []
         loss_D = []
+        optimizer_G.zero_grad()
+        optimizer_D.zero_grad()
         fake_img, fake_index = generator(real_img, cifar_img, real_label)
         # print("fake_index shape is ", fake_index[0].shape)
         for index,image_index in zip(fake_index,fake_img):
@@ -209,6 +222,15 @@ for epoch in range(opt.epoch, opt.n_epochs):
             pred_real   = discriminator(cifar_img, cifar_vec)
             loss_d_real = criterion_GAN(pred_real, valid) * opt.adv_times
             loss_D.append(loss_d_real + loss_d_fake)
+        """
+        loss_G_all = sum(loss_G)
+        loss_G_all.backward()
+        optimizer_G.step()
+
+        loss_D_all = sum(loss_D)
+        loss_D_all.backward()
+        optimizer_D.step()
+        """
         for k in range(0,len(loss_D)):
             optimizer_G.zero_grad()
             if k == 0:
@@ -223,7 +245,7 @@ for epoch in range(opt.epoch, opt.n_epochs):
             else:
                 loss_D[k].backward()
             optimizer_D.step()
-            
+         
         # --------------
         #  Log Progress
         # --------------

@@ -49,6 +49,7 @@ class Logger():
         
         # Save image sample
         image_sample = torch.cat((images['real'].data, images['fake'].data), -2)
+        # image_sample = images['cifar'].data
         self.past_images.append(image_sample)
         if len(self.past_images) > self.n_samples:
             self.past_images.pop(0)

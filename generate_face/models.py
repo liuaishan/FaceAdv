@@ -404,10 +404,9 @@ class Discriminator(nn.Module):
         return self.model(img_input)
 '''
 
-'''
-class Discriminator(nn.Module):
+class CDiscriminator(nn.Module):
     def __init__(self,class_axis = 10, patch_size = 32, ch = 3):
-        super(Discriminator,self).__init__()
+        super(CDiscriminator,self).__init__()
         self.model = nn.Sequential(
         nn.Linear(class_axis + patch_size * patch_size * ch, 512),
         nn.ReLU(inplace = True),
@@ -426,11 +425,10 @@ class Discriminator(nn.Module):
         out  = self.model(d_in)
 
         return out 
-'''
 
-class Discriminator(nn.Module):
+class CDCDiscriminator(nn.Module):
     def __init__(self, class_axis = 10, patch_size = 32, ch=3):
-        super(Discriminator, self).__init__()
+        super(CDCDiscriminator, self).__init__()
         self.conv1_1 = nn.Conv2d(ch, 64, 4, 2, 1)
         self.conv1_2 = nn.Conv2d(10, 64, 4, 2, 1)
 
@@ -457,5 +455,3 @@ class Discriminator(nn.Module):
         x = F.sigmoid(self.conv4(x))
 
         return x.view(x.size(0), 1)
-
-
