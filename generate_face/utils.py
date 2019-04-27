@@ -2,7 +2,7 @@ import random
 import time
 import datetime
 import sys
-
+import cv2
 from torch.autograd import Variable
 import torch
 import numpy as np
@@ -26,6 +26,7 @@ class Logger():
         self.losses = {}
         self.n_samples = n_samples
         self.past_images = []
+        self.past_cifar = []
 
     def log(self, losses=None, images=None, epoch=0, batch=0):
         self.mean_period += (time.time() - self.prev_time)
@@ -49,18 +50,24 @@ class Logger():
         
         # Save image sample
         image_sample = torch.cat((images['real'].data, images['fake'].data), -2)
-        # image_sample = images['cifar'].data
+        image_cifar = images['cifar'].data
+
         self.past_images.append(image_sample)
+        self.past_cifar.append(image_cifar)
         if len(self.past_images) > self.n_samples:
             self.past_images.pop(0)
-
+        if len(self.past_cifar) > self.n_samples:
+            self.past_cifar.pop(0)
 
         # If at sample interval save past samples
         if self.batches_done % self.sample_interval == 0 and images is not None:
             save_image(torch.cat(self.past_images, -1),
-                        './images/%d.png' % self.batches_done,
+                        './images/%d_gener.png' % self.batches_done,
                         normalize=True)
-        
+            save_image(torch.cat(self.past_cifar, -1),
+                        './images/%d_cifar.png' % self.batches_done,
+                        normalize=True)
+         
         self.batches_done += 1
 
 
@@ -103,3 +110,30 @@ def weights_init_normal(m):
     elif classname.find('BatchNorm2d') != -1:
         torch.nn.init.normal_(m.weight.data, 1.0, 0.02)
         torch.nn.init.constant_(m.bias.data, 0.0)
+
+def possion(src, dst, center, mode = cv2.NORMAL_CLONE):
+    """
+      @src:    the pic which will be embed
+               shape = N W H C, requires element range form 0 to 255
+      @dst:    the pic the src will be embed in
+      @center: where to embed the picture
+      @mode:   how to embed
+      @return: composite picture
+    """
+    src = src.astype(np.uint8)
+    dst = dst.astype(np.uint8)
+    shape = src[0].shape
+   
+    out   = []
+    
+    mask  = 255 * np.ones(shape, src.dtype)
+    mask  = mask.astype(np.uint8)
+    
+    for i in range(src.shape[0]):
+        out.append(cv2.seamlessClone(src[i], dst[i], mask, center[i], mode))
+    out = np.array(out).swapaxes(2,3).swapaxes(1,2)
+    return out
+    
+
+
+

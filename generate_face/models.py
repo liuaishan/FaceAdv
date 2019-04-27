@@ -2,6 +2,41 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 import numpy as np
+#############################
+#           CDCGEN
+#############################
+class cdcGenerator(nn.Module):
+    # initializers
+    def __init__(self, d=128):
+        super(generator, self).__init__()
+        self.deconv1_1 = nn.ConvTranspose2d(100, d*2, 4, 1, 0)
+        self.deconv1_1_bn = nn.BatchNorm2d(d*2)
+        self.deconv1_2 = nn.ConvTranspose2d(10, d*2, 4, 1, 0)
+        self.deconv1_2_bn = nn.BatchNorm2d(d*2)
+        self.deconv2 = nn.ConvTranspose2d(d*4, d*2, 4, 2, 1)
+        self.deconv2_bn = nn.BatchNorm2d(d*2)
+        self.deconv3 = nn.ConvTranspose2d(d*2, d, 4, 2, 1)
+        self.deconv3_bn = nn.BatchNorm2d(d)
+        self.deconv4 = nn.ConvTranspose2d(d, 1, 4, 2, 1)
+
+    # weight_init
+    def weight_init(self, mean, std):
+        for m in self._modules:
+            normal_init(self._modules[m], mean, std)
+
+    # forward method
+    def forward(self, input, label):
+        label = label.view(label.size(0), label.size(1), 1, 1)
+        label = label.repeat(1, 1, input.size(2), input.size(3))
+        
+        x = F.relu(self.deconv1_1_bn(self.deconv1_1(input)))
+        y = F.relu(self.deconv1_2_bn(self.deconv1_2(label)))
+        x = torch.cat([x, y], 1)
+        x = F.relu(self.deconv2_bn(self.deconv2(x)))
+        x = F.relu(self.deconv3_bn(self.deconv3(x)))
+        x = F.tanh(self.deconv4(x))
+
+        return x 
 ##############################
 #           U-NET
 ##############################
@@ -143,10 +178,10 @@ class GeneratorUNet(nn.Module):
             temp[i, 0, 6, 7] = 1
         lst.append(temp)
   
-        temp = torch.full((x.size()[0], 1, 8, 8), 0).cuda()
-        for i in range(x.size()[0]):
-            temp[i, 0, 2, 7] = 1
-        lst.append(temp)
+        # temp = torch.full((x.size()[0], 1, 8, 8), 0).cuda()
+        # for i in range(x.size()[0]):
+        #     temp[i, 0, 2, 7] = 1
+        # lst.append(temp)
         
         return lst
 
@@ -377,7 +412,7 @@ class GeneratorResNet(nn.Module):
 ##############################
 #        Discriminator
 ##############################
-'''
+
 class Discriminator(nn.Module):
     def __init__(self, in_channels=3):
         super(Discriminator, self).__init__()
@@ -402,29 +437,30 @@ class Discriminator(nn.Module):
         # Concatenate image and condition image by channels to produce input
         img_input = torch.cat((img_A, img_B), 1)
         return self.model(img_input)
-'''
+
 
 class CDiscriminator(nn.Module):
     def __init__(self,class_axis = 10, patch_size = 32, ch = 3):
         super(CDiscriminator,self).__init__()
-        self.model = nn.Sequential(
-        nn.Linear(class_axis + patch_size * patch_size * ch, 512),
-        nn.ReLU(inplace = True),
-        nn.Linear(512, 512),
-        nn.Dropout(0.4),
-        nn.ReLU(inplace = True),
-        nn.Linear(512,512),
-        nn.Dropout(0.4),
-        nn.ReLU(inplace = True),
-        nn.Linear(512,1),
+        self.linear1 = nn.Linear(class_axis + patch_size * patch_size * ch, 512)
+        self.linear2 = nn.Linear(512, 512)
+        self.drop2   = nn.Sequential(nn.Dropout(0.4))
+        self.linear3 = nn.Linear(512, 512)
+        self.drop3   = nn.Sequential(nn.Dropout(0.4))
+        self.linear4 = nn.Linear(512,1)
         nn.Sigmoid()
-        )
     def forward(self, img, label):
      
         d_in = torch.cat((img.view(img.size(0),-1),label), -1)
-        out  = self.model(d_in)
+        # out  = self.model(d_in)
+        x = F.leaky_relu(self.linear1(d_in), 0.2)
+        x = F.leaky_relu(self.drop2(self.linear2(x)), 0.2)
 
-        return out 
+        x = F.leaky_relu(self.drop3(self.linear3(x)), 0.2)
+
+        x = F.sigmoid(self.linear4(x))
+          
+        return x 
 
 class CDCDiscriminator(nn.Module):
     def __init__(self, class_axis = 10, patch_size = 32, ch=3):
@@ -435,10 +471,10 @@ class CDCDiscriminator(nn.Module):
         self.conv2    = nn.Conv2d(128, 256, 4, 2, 1)
         self.conv2_bn = nn.BatchNorm2d(256)
 
-        self.conv3    = nn.Conv2d(256, 512, 4, 2, 1)
-        self.conv3_bn = nn.BatchNorm2d(512)
+        self.conv3    = nn.Conv2d(256, 256, 4, 2, 1)
+        self.conv3_bn = nn.BatchNorm2d(256)
      
-        self.conv4    = nn.Conv2d(512, 1, 4, 1, 0)
+        self.conv4    = nn.Conv2d(256, 1, 4, 1, 0)
 
     def forward(self, input, label):
         label = label.view(label.size(0), label.size(1), 1, 1)

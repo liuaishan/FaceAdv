@@ -9,7 +9,7 @@
 
 ## How to train this model
 ``` python
-	python pix2pix
+	python pix2pix.py
 ```
 
 ### to do list
