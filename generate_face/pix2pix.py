@@ -53,7 +53,7 @@ criterion_GAN = torch.nn.MSELoss()
 criterion_translation = torch.nn.L1Loss()
 criterion_BCE = torch.nn.BCELoss()
 
-
+# check whether can use cuda
 cuda = True if torch.cuda.is_available() else False
 
 # Calculate output of image discriminator (PatchGAN)
@@ -69,6 +69,7 @@ if cuda:
     criterion_GAN.cuda()
     criterion_translation.cuda()
 
+# Whether load pretrained models
 if opt.epoch != 0:
     # Load pretrained models
     generator.load_state_dict(torch.load('saved_models/generator_%d.pth'))
@@ -84,7 +85,6 @@ lambda_trans = 100
 # Optimizers
 optimizer_G = torch.optim.Adam(generator.parameters(), lr=opt.lr_G, betas=(opt.b1, opt.b2))
 optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=opt.lr_D, betas=(opt.b1, opt.b2))
-
 
 # Learning rate update schedulers
 lr_scheduler_G = torch.optim.lr_scheduler.LambdaLR(optimizer_G, lr_lambda=LambdaLR(opt.n_epochs, opt.epoch, opt.decay_epoch).step)
@@ -103,33 +103,34 @@ input_vec   = Tensor(opt.batch_size, 10)
 valid = Variable(Tensor(np.ones((opt.batch_size,1))), requires_grad=False)
 fake = Variable(Tensor(np.zeros((opt.batch_size,1))), requires_grad=False)
 
-# Dataset loader
+# Dataset loader of ImageNet
 transforms_ = [ transforms.Resize((opt.img_height, opt.img_width), Image.BICUBIC),
                 transforms.ToTensor(),
                 transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5))]
 dataloader = DataLoader(ImageDataset("/media/dsg3/%s" % opt.dataset_name, transforms_=transforms_, mode=["n02102480", "n02105056"]),
                         batch_size=opt.batch_size, shuffle=True, num_workers=opt.n_cpu)
 
-
 # Cifar loader
 transforms_cifar = [ 
                 transforms.ToTensor(),
                 transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5)) ]
-trans_cifar = transforms.Compose(transforms_cifar)
-cifar = scio.loadmat("/media/dsg3/datasets/cifar10/cifar_32.mat")
-cifar_data = cifar['data'].reshape(60000,3,32,32).astype(np.uint8)# / 255.0   # size is [60000, 3072] = [60000, 32*32*3]
-cifar_data = cifar_data.swapaxes(1,2).swapaxes(2,3)
-b = []
-for i in range(60000):
-    b.append(trans_cifar(cifar_data[i]).unsqueeze(0))#.swapaxes(0,1).swapaxes(1,2)).unsqueeze(0))
-cifar_label = cifar['label']  # size if [60000, 1]
-cifar_data =torch.cat(b,0)
+trans_cifar = transforms.Compose(transforms_cifar)                    # use the same transforms as ImageNet
 
-print(cifar_data.shape)
+cifar = scio.loadmat("/media/dsg3/datasets/cifar10/cifar_32.mat")     # load the cifar data
+cifar_data = cifar['data'].reshape(60000,3,32,32).astype(np.uint8)    # reshape to 
+cifar_data = cifar_data.swapaxes(1,2).swapaxes(2,3)                   # swapaxes because the .ToTensor() change [W,H,C] to [C,W,H]
+
+b = []
+for i in range(60000):                                                # transforms all cifar picture
+    b.append(trans_cifar(cifar_data[i]).unsqueeze(0))    
+
+cifar_data = torch.cat(b,0)
+
+cifar_label = cifar['label']  # size if [60000, 1]
 cifar_label = torch.LongTensor(cifar_label)
 cifar_label = torch.zeros(60000, 10).scatter_(1, cifar_label, 1)
 
-
+# Cifar loader
 cifarLoader = DataLoader(torch.utils.data.TensorDataset(cifar_data, cifar_label), 
                          batch_size=opt.batch_size, shuffle=True, num_workers=opt.n_cpu)
 
@@ -146,6 +147,7 @@ logger = Logger(opt.n_epochs, len(dataloader), opt.sample_interval)
 for epoch in range(opt.epoch, opt.n_epochs):
     for batch_n, batch in enumerate(dataloader):
 
+        # get the input of cifar
         cifarN += 1
         if cifarN >= len(cifarLoader):
             cifarN = 0
@@ -155,96 +157,87 @@ for epoch in range(opt.epoch, opt.n_epochs):
         
         cifar_img = Variable(input_cifar.copy_(cifar_img_))
         cifar_vec = Variable(input_vec.copy_(cifar_vec_))
+        
         # Set model input
         real_img = Variable(input_img.copy_(batch))
         real_label = Variable(input_vec.copy_(cifar_vec))        
-        # print("read img size is :", real_img.size)
-
-        # ------------------
-        #  Train Generators
-        # ------------------
-
-
-        # GAN loss
+        
+        loss_G = []
+        loss_D = []
+        
+        # Generator generates picture and the top_k index
+        fake_img, fake_index = generator(real_img, cifar_img, real_label)
         """
         @ fake_img:   list, produced image, length = k(top_k), size = N C W H
         @ fake_index: list, location of embed, length = k(top_k), size = N 1 8 8
         """
-        loss_G = []
-        loss_D = []
-        optimizer_G.zero_grad()
-        optimizer_D.zero_grad()
-        fake_img, fake_index = generator(real_img, cifar_img, real_label)
-        # print("fake_index shape is ", fake_index[0].shape)
+        
+        # for every top_k index to calculate loss 
         for index,image_index in zip(fake_index,fake_img):
+            """
+            @ index:       top_k
+            @ image_index: fake_images produced
+            """
             loss_l1 = 0.            
-            index_value        = index.cpu().data.numpy()
-            fake_index_list    = np.argwhere(index_value == 1)
-            fake_img_dis = []
-            fake_img_np = image_index.cpu().data.numpy()
-            center =  [] 
-            # print("fake index list is :" , fake_index_list)
-            for i,f_index in zip(range(0,opt.batch_size),fake_index_list):
-                
+            index_value        = index.cpu().data.numpy()      # transform the location to numpy
+            fake_index_list    = np.argwhere(index_value == 1) # to find which pixel insert cifar image
+            fake_img_dis = []                                  # to store the cifar patches produced
+            fake_img_np = image_index.cpu().data.numpy()       # fake_image produced to numpy
+            center =  []                                       # to find the location center 
+
+            # for every picture to select its center
+            for i,f_index in zip(range(0,opt.batch_size),fake_index_list): 
                 center.append((f_index[3] * 32 + 16, f_index[2] * 32 + 16))
-                # print("the fake index location on surface is :", f_index[2],f_index[3])              
-                # print("the imgae shape is : ", image_index.shape)  
                 fake_img_dis.append(image_index[i:i+1, :, f_index[2]*32:f_index[2]*32+32, f_index[3]*32:f_index[3]*32+32])
+                
+                # mask, similar to face mask, to stand for which patch is cifar iamge produced
                 mask = np.ones((opt.img_height,opt.img_width))
-                # print(mask.shape)
                 mask[int(f_index[2]*32):int(f_index[2]*32+32), int(f_index[3]*32):int(f_index[3]*32+32)] = 0
-                # mask[1:5,10:6] =0
                 mask = Tensor(mask)
-                #loss_l1 +=  criterion_translation( image_index[i] * mask,  real_img[i] * mask )
-                # loss_l1 +=  criterion_translation( image_index[i],  real_img[i])
-                # print(i)
-            # print("\ncifar image max = ", cifar_img.max())
-            # print("cifar image min = ", cifar_img.min())
+            
+            # To make ground truth, the real cifar image  
             cifar_embed = (cifar_img*0.5 + 0.5) * 255
             cifar_embed = cifar_embed.cpu().data.numpy()
-            # print("cifar label max = ", cifar_embed.max())
-            # print("cifar label min = ", cifar_embed.min())
             cifar_embed = cifar_embed.swapaxes(1,2).swapaxes(2,3)                
- 
+
+            # To make ground truth, the real ImageNet image 
             img_label = (real_img*0.5 + 0.5) * 255
             img_label = img_label.cpu().data.numpy()
             img_label = img_label.swapaxes(1,2).swapaxes(2,3)
+ 
+            # make use of Possion, to make ground truth
             label  = Tensor(possion(cifar_embed, img_label, center)).cuda()
             label  = label / 255.
             label  = (label - 0.5) / 0.5
+
+            # calculate loss of l1
             loss_l1 = criterion_translation(image_index, label) 
                    
-                   
+            # dis_input contains patches of cifar produced 
             dis_input = torch.cat(fake_img_dis,0).cuda()
+
+            # calculate g_adv 
             pred_fake = discriminator(dis_input, cifar_vec)
             loss_g_adv = criterion_BCE(pred_fake,valid) * opt.adv_times
          
-
-            # Total loss
-            # loss_G.append( loss_l1 + loss_g_adv) 
-            loss_G.append( loss_l1) 
+            # G Total loss
+            loss_G.append( loss_l1 + loss_g_adv) 
 
             # ---------------------
             #  Train Discriminator
             # ---------------------
 
+            # calculate loss of dis 
             pred_fake = discriminator(dis_input, cifar_vec)
-            # loss_d_fake = criterion_GAN(pred_fake.detach(),fake) * opt.adv_times
             loss_d_fake = criterion_BCE(pred_fake.detach(),fake) * opt.adv_times
          
             pred_real   = discriminator(cifar_img, cifar_vec)
-            # loss_d_real = criterion_GAN(pred_real, valid) * opt.adv_times
             loss_d_real = criterion_BCE(pred_real, valid) * opt.adv_times
+            
+            # D Total loss
             loss_D.append(loss_d_real + loss_d_fake)
-        """
-        loss_G_all = sum(loss_G)
-        loss_G_all.backward()
-        optimizer_G.step()
-
-        loss_D_all = sum(loss_D)
-        loss_D_all.backward()
-        optimizer_D.step()
-        """
+        
+        # backward the loss
         for k in range(0,len(loss_D)):
             optimizer_G.zero_grad()
             if k == 0:
@@ -253,12 +246,12 @@ for epoch in range(opt.epoch, opt.n_epochs):
                 loss_G[k].backward()
             optimizer_G.step()
             
-            # optimizer_D.zero_grad()
-            # if k == 0:
-            #     loss_D[k].backward(retain_graph=True)
-            # else:
-            #     loss_D[k].backward()
-            # optimizer_D.step()
+            optimizer_D.zero_grad()
+            if k == 0:
+                loss_D[k].backward(retain_graph=True)
+            else:
+                loss_D[k].backward()
+            optimizer_D.step()
          
         # --------------
         #  Log Progress
