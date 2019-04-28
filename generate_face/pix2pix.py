@@ -22,7 +22,7 @@ import torch
 
 import scipy.io as scio
 
-os.environ['CUDA_VISIBLE_DEVICES'] ='7'
+os.environ['CUDA_VISIBLE_DEVICES'] ='5'
 os.makedirs('images', exist_ok=True)
 os.makedirs('saved_models', exist_ok=True)
 
@@ -44,8 +44,11 @@ parser.add_argument('--channels', type=int, default=3, help='number of image cha
 parser.add_argument('--sample_interval', type=int, default=50, help='interval between sampling of images from generators')
 parser.add_argument('--checkpoint_interval', type=int, default=-1, help='interval between model checkpoints')
 parser.add_argument('--generator_type', type=str, default='unet', help="'resnet' or 'unet'")
+parser.add_argument('--cifar_deal_type', type=str, default='en-de', help="'en-en' or 'fc'")
 parser.add_argument('--discriminator_type', type=str, default='cdcgan', help="'cgan' or 'cdcgan'")
 parser.add_argument('--n_residual_blocks', type=int, default=0, help='number of residual blocks in resnet generator')
+parser.add_argument('--hide_skip_pixel', type=bool, default=True, help='when skip connection whether to hide the pixels for patches')
+
 opt = parser.parse_args()
 
 # Loss functions
@@ -61,7 +64,7 @@ patch_h, patch_w = int(opt.img_height / 2**4), int(opt.img_width / 2**4)
 patch = (opt.batch_size, 1, patch_h, patch_w)
 
 # Initialize generator and discriminator
-generator = GeneratorResNet(resblocks=opt.n_residual_blocks) if opt.generator_type == 'resnet' else GeneratorUNet()
+generator = GeneratorResNet(resblocks=opt.n_residual_blocks) if opt.generator_type == 'resnet' else GeneratorUNet(opt=opt, mode=opt.cifar_deal_type)
 discriminator = CDiscriminator() if opt.discriminator_type == "cgan" else CDCDiscriminator()
 if cuda:
     generator = generator.cuda()
@@ -210,6 +213,11 @@ for epoch in range(opt.epoch, opt.n_epochs):
             label  = label / 255.
             label  = (label - 0.5) / 0.5
 
+            # ---------------------
+            #  Train Generator
+            # ---------------------
+            optimizer_G.zero_grad()
+          
             # calculate loss of l1
             loss_l1 = criterion_translation(image_index, label) 
                    
@@ -221,11 +229,14 @@ for epoch in range(opt.epoch, opt.n_epochs):
             loss_g_adv = criterion_BCE(pred_fake,valid) * opt.adv_times
          
             # G Total loss
-            loss_G.append( loss_l1 + loss_g_adv) 
+            loss_g = loss_l1 + loss_g_adv
+            loss_g.backward()
+            optimizer_G.step()
 
             # ---------------------
             #  Train Discriminator
             # ---------------------
+            optimizer_D.zero_grad()
 
             # calculate loss of dis 
             pred_fake = discriminator(dis_input, cifar_vec)
@@ -235,9 +246,10 @@ for epoch in range(opt.epoch, opt.n_epochs):
             loss_d_real = criterion_BCE(pred_real, valid) * opt.adv_times
             
             # D Total loss
-            loss_D.append(loss_d_real + loss_d_fake)
-        
-        # backward the loss
+            loss_d = loss_d_real + loss_d_fake
+            loss_d.backward()
+            optimizer_D.step()
+        '''# backward the loss
         for k in range(0,len(loss_D)):
             optimizer_G.zero_grad()
             if k == 0:
@@ -252,12 +264,12 @@ for epoch in range(opt.epoch, opt.n_epochs):
             else:
                 loss_D[k].backward()
             optimizer_D.step()
-         
+        ''' 
         # --------------
         #  Log Progress
         # --------------
 
-        logger.log({'loss_G':  loss_G[0], 
+        logger.log({'loss_G':  loss_g, 
                     'loss_l1': loss_l1,
                     'loss_d_fake': loss_d_fake,
                     'loss_d_real': loss_d_real, 

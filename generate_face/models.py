@@ -70,15 +70,19 @@ class UNetUp(nn.Module):
 
         self.model = nn.Sequential(*model)
 
-    def forward(self, x, skip_input):
+    def forward(self, x, skip_input, index):
         x = self.model(x)
-        out = torch.cat((x, skip_input), 1)
-        #out = torch.add(x, skip_input)
+        
+        size = skip_input.size()
+        index = index.repeat(1, size[1], size[2] // 8, size[3] // 8)
+        out = torch.cat((x, skip_input * (1 - index)), 1)
         return out
 
 class GeneratorUNet(nn.Module):
-    def __init__(self, in_channels=3, out_channels=3):
+    def __init__(self, opt, in_channels=3, out_channels=3, mode="fc"):
         super(GeneratorUNet, self).__init__()
+        self.mode = mode
+        self.opt = opt
 
         self.down1 = UNetDown(in_channels, 64, normalize=False)
         self.down2 = UNetDown(64, 128)
@@ -98,8 +102,6 @@ class GeneratorUNet(nn.Module):
                   ]
             return lst
 
-
-                                  
         self.Cg = nn.Sequential(*conv2d(512, 256, ksize=3, stride=1, padding=1))
 
         C  = conv2d(512, 256, ksize=3, stride=1, padding=1)
@@ -139,19 +141,12 @@ class GeneratorUNet(nn.Module):
         Cg_temp = self.Cg(encoder)
         Cg = GlobalMaxPool(Cg_temp)   # Cg: [N, Cg, 1, 1]
        
-        # print("Cg size is : ", Cg.size())
- 
         Cl = torch.unsqueeze(vec, 2)
         Cl = torch.unsqueeze(Cl, 3)
         
         size = Cl.size()
         Cgl = torch.cat([Cg, Cl], 1)
         
-        # Czeros = torch.full((size[0], 512 - 266, 1, 1), 0).cuda()
-        # Cgl = torch.cat([Cg, Cl, Czeros], 1)
-        # Cgl = Cl
-        # Cgl = Cgl.repeat(1, 1, encoder.size()[2], encoder.size()[3])
-
         return Cgl
 
     def top_k(self, x, k):
@@ -160,29 +155,12 @@ class GeneratorUNet(nn.Module):
             @k:      int, mean the top number
             @return: lst, 
         """
-        """
-        MINIMUM = -1
-        lst = []
-        clone_tensor = x.clone()
-        for _ in range(k):
-            temp = []
-            for i in range(x.size()[0]):
-                index = torch.max(clone_tensor[i:i+1,:,:,:], dim=0, keepdim=True)
-                clone_tensor[index] = MINIMUM
-                temp.append(index)
-            lst.append(torch.cat(temp, 0))
-        """
         lst = []
         temp = torch.full((x.size()[0], 1, 8, 8), 0).cuda()
         for i in range(x.size()[0]):
             temp[i, 0, 6, 7] = 1
         lst.append(temp)
   
-        # temp = torch.full((x.size()[0], 1, 8, 8), 0).cuda()
-        # for i in range(x.size()[0]):
-        #     temp[i, 0, 2, 7] = 1
-        # lst.append(temp)
-        
         return lst
 
     def k_feature(self, x, vec, k_list):
@@ -201,38 +179,40 @@ class GeneratorUNet(nn.Module):
         d4 = self.down4(d3)
         d5 = self.down5(d4)
         
-        """ the idea that the uses the encodered cifar code to fill in the area""" 
-        """
-        Cg = self.cifar(cifar_img)
-        Cl = torch.unsqueeze(vec, 2)
-        Cl = torch.unsqueeze(Cl, 3)
-        Czeros = torch.full((Cg.size()[0], 512 - 266, 1, 1), 0).cuda()
-        Cgl = torch.cat([Cg, Cl, Czeros], 1)
-        Cgl = Cgl.repeat(1, 1, 8, 8) 
-        """
-        Cgl = self.calculate_vector(d5, vec)	# get the vector we will embed in
-       						# size = [N, 512, 8, 8]
-        Cgl = Cgl.view(Cgl.size()[0], -1)
-        Cgl = self.Clg_fc(Cgl)
-        Cgl = Cgl.view(Cgl.size()[0], Cgl.size()[1], 1, 1)
-        Cgl = Cgl.repeat(1, 1, 8, 8)
-        # print("Cgl size ", Cgl.size())
-        
+        if self.mode == "en-de":
+            """ the idea that the uses the encodered cifar code to fill in the area"""  
+            Cg = self.cifar(cifar_img)
+            Cl = torch.unsqueeze(vec, 2)
+            Cl = torch.unsqueeze(Cl, 3)
+            Czeros = torch.full((Cg.size()[0], 512 - 266, 1, 1), 0).cuda()
+            Cgl = torch.cat([Cg, Cl, Czeros], 1)
+            Cgl = Cgl.repeat(1, 1, 8, 8) 
+        elif self.mode == "fc":
+            """ Cgl into fc layer"""
+            Cgl = self.calculate_vector(d5, vec)	# get the vector we will embed in
+       	     					        # size = [N, 512, 8, 8]
+            Cgl = Cgl.view(Cgl.size()[0], -1)
+            Cgl = self.Clg_fc(Cgl)
+            Cgl = Cgl.view(Cgl.size()[0], Cgl.size()[1], 1, 1)
+            Cgl = Cgl.repeat(1, 1, 8, 8)
 
-        # Cglo = torch.cat([Cgl, d5], 1)
-
-
-        # C = self.C(Cglo)
         k_list = self.top_k(Cgl, 2)		# get the location we will set the patch
         k_feat = self.k_feature(d5, Cgl, k_list) # set the patch into the picture
 
         lst = []
-        for item in k_feat:
+        for i in range(len(k_feat)):
+            item = k_feat[i]
+            
+            if self.opt.hide_skip_pixel:
+                index = k_list[i]
+            else:
+                index = torch.full((item.size()[0], 1, 8, 8), 0).cuda()
+
             middle = self.middle(item)
-            u1 = self.up1(middle, d4)
-            u2 = self.up2(u1, d3)
-            u3 = self.up3(u2, d2)
-            u4 = self.up4(u3, d1)
+            u1 = self.up1(middle, d4, index)
+            u2 = self.up2(u1,     d3, index)
+            u3 = self.up3(u2,     d2, index)
+            u4 = self.up4(u3,     d1, index)
             lst.append(self.final(u4))
 
         return lst, k_list
