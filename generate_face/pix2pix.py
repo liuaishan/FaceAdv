@@ -47,7 +47,8 @@ parser.add_argument('--generator_type', type=str, default='unet', help="'resnet'
 parser.add_argument('--cifar_deal_type', type=str, default='en-de', help="'en-en' or 'fc'")
 parser.add_argument('--discriminator_type', type=str, default='cdcgan', help="'cgan' or 'cdcgan'")
 parser.add_argument('--n_residual_blocks', type=int, default=0, help='number of residual blocks in resnet generator')
-parser.add_argument('--hide_skip_pixel', type=bool, default=True, help='when skip connection whether to hide the pixels for patches')
+parser.add_argument('--hide_skip_pixel', type=bool, default=True, help='skip connection whether to hide the pixels for patches')
+parser.add_argument('--region_wise_conv', type=bool, default=True, help='whether use region_wise convolution')
 
 opt = parser.parse_args()
 

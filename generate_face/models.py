@@ -78,6 +78,30 @@ class UNetUp(nn.Module):
         out = torch.cat((x, skip_input * (1 - index)), 1)
         return out
 
+class UNetUpRegionWise(nn.Module):
+    def __init__(self, in_size, out_size, dropout=0.0):
+        super(UNetUpRegionWise, self).__init__()
+        model = [   nn.Upsample(scale_factor=2),
+                    nn.Conv2d(in_size, out_size, 3, stride=1, padding=1),
+                    nn.ReLU(inplace=True),
+                    nn.BatchNorm2d(out_size, 0.8) ]
+        if dropout:
+            model += [nn.Dropout(dropout)]
+
+        self.model = nn.Sequential(*model)
+
+    def forward(self, com, skip_input, index):
+        size2 = com.size()
+        index2 = index.repeat(1, size2[1], size2[2] // 8, size2[3] // 8) 
+        mis = com * index2
+        
+        com = torch.cat((com, skip_input), 1)
+        size1 = com.size()
+        index1 = index.repeat(1, size1[1], size1[2] // 8, size1[3] // 8) 
+        com = com * (1 - index1)
+
+        return self.model(torch.cat((com, mis), 1))
+
 class GeneratorUNet(nn.Module):
     def __init__(self, opt, in_channels=3, out_channels=3, mode="fc"):
         super(GeneratorUNet, self).__init__()
@@ -90,10 +114,16 @@ class GeneratorUNet(nn.Module):
         self.down4 = UNetDown(256, 512, dropout=0.5)
         self.down5 = UNetDown(512, 512, dropout=0.5)
 
-        self.up1 = UNetUp(512, 512, dropout=0.5)
-        self.up2 = UNetUp(1024, 256, dropout=0.5)
-        self.up3 = UNetUp(512, 128)
-        self.up4 = UNetUp(256, 64)
+        if not opt.region_wise_conv:
+            self.up1 = UNetUp(512, 512, dropout=0.5)
+            self.up2 = UNetUp(1024, 256, dropout=0.5)
+            self.up3 = UNetUp(512, 128)
+            self.up4 = UNetUp(256, 64)
+        else:
+            self.up1 = UNetUpRegionWise(1536, 256, dropout=0.5)
+            self.up2 = UNetUpRegionWise(1024, 256, dropout=0.5)
+            self.up3 = UNetUp(256, 128)
+            self.up4 = UNetUp(256, 64)
 
         def conv2d(in_features, out_features, ksize=3, stride=1, padding=1):
             lst = [  nn.Conv2d(in_features, out_features, ksize, stride, padding),
@@ -187,6 +217,7 @@ class GeneratorUNet(nn.Module):
             Czeros = torch.full((Cg.size()[0], 512 - 266, 1, 1), 0).cuda()
             Cgl = torch.cat([Cg, Cl, Czeros], 1)
             Cgl = Cgl.repeat(1, 1, 8, 8) 
+
         elif self.mode == "fc":
             """ Cgl into fc layer"""
             Cgl = self.calculate_vector(d5, vec)	# get the vector we will embed in
@@ -196,25 +227,40 @@ class GeneratorUNet(nn.Module):
             Cgl = Cgl.view(Cgl.size()[0], Cgl.size()[1], 1, 1)
             Cgl = Cgl.repeat(1, 1, 8, 8)
 
-        k_list = self.top_k(Cgl, 2)		# get the location we will set the patch
-        k_feat = self.k_feature(d5, Cgl, k_list) # set the patch into the picture
-
+        k_list = self.top_k(Cgl, 2)	         # get the location we will set the patch
+        
         lst = []
-        for i in range(len(k_feat)):
-            item = k_feat[i]
+        if not self.opt.region_wise_conv:
+            k_feat = self.k_feature(d5, Cgl, k_list) # set the patch into the picture
+  
+            for i in range(len(k_feat)):
+                item = k_feat[i]
             
-            if self.opt.hide_skip_pixel:
+                if self.opt.hide_skip_pixel:
+                    index = k_list[i]
+                else:
+                    index = torch.full((item.size()[0], 1, 8, 8), 0).cuda()
+
+                middle = self.middle(item)
+                u1 = self.up1(middle, d4, index)
+                u2 = self.up2(u1,     d3, index)
+                u3 = self.up3(u2,     d2, index)
+                u4 = self.up4(u3,     d1, index)
+                lst.append(self.final(u4))
+        else:
+            for i in range(len(k_list)):
                 index = k_list[i]
-            else:
-                index = torch.full((item.size()[0], 1, 8, 8), 0).cuda()
+                
+                index1 = index.repeat(1, d5.size(1), 1, 1)
+                x_com = d5 * (1 - index1)
+                x_mis = Cgl * index1
 
-            middle = self.middle(item)
-            u1 = self.up1(middle, d4, index)
-            u2 = self.up2(u1,     d3, index)
-            u3 = self.up3(u2,     d2, index)
-            u4 = self.up4(u3,     d1, index)
-            lst.append(self.final(u4))
-
+                u1 = self.up1(x_com,  d5, index)
+                u2 = self.up2(u1,     d4, index)
+                u3 = self.up3(u2,     d2, index)
+                u4 = self.up4(u3,     d1, index)
+                lst.append(self.final(u4))
+ 
         return lst, k_list
 
 
